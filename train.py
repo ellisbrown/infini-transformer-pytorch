@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
+import wandb
 
 @dataclass
 class Config:
@@ -18,7 +19,6 @@ class Config:
     learning_rate: float = 2e-4
     validate_every: int = 50
     generate_every: int = 25
-    print_every: int = 10
     prime_len: int = 100
     seq_len: int = 1024
     segment_length: int = 128
@@ -29,9 +29,12 @@ class Config:
     dim_head: int = 64
     heads: int = 8
     use_mem_delta_rule: bool = True
-
+    print_every: int = 10
+    wandb_project: str = "infini-transformer-pytorch"
 
 def main(config: Config):
+
+    wandb.init(project=config.wandb_project, config=config)
 
     print(config)
 
@@ -107,17 +110,20 @@ def main(config: Config):
 
             if i % config.print_every == 0:
                 print(f'Step {i}, Training loss: {loss.item()}')
+                wandb.log({"training_loss": loss.item(), "step": i + epoch * len(train_loader)})
 
             if i % config.validate_every == 0:
                 with torch.no_grad():
                     model.eval()
                     val_loss = wrapper(next(iter(val_loader)))
-                    print(f'validation loss: {val_loss.item()}')
+                    print(f'Validation loss: {val_loss.item()}')
+                    wandb.log({"validation_loss": val_loss.item(), "step": i + epoch * len(train_loader)})
+                    model.train()
 
             if i % config.generate_every == 0:
                 ids = next(iter(val_loader))[:, :config.prime_len]
                 prime = decode_tokens(ids.flatten())
-                print('%s \n\n %s', (prime, '*' * 100))
+                print('%s \n\n %s' % (prime, '*' * 100))
 
                 sample = wrapper.generate(
                     prompt=ids,
@@ -127,8 +133,13 @@ def main(config: Config):
                 decoded_string = decode_tokens(sample.flatten())
                 print(decoded_string)
                 print("\n")
+                wandb.log({"generated_text": decoded_string, "step": i + epoch * len(train_loader)})
 
-        print(f'Epoch {epoch + 1}/{config.num_epochs}, Training Loss: {epoch_loss / len(train_loader)}')
+        avg_epoch_loss = epoch_loss / len(train_loader)
+        print(f'Epoch {epoch + 1}/{config.num_epochs}, Training Loss: {avg_epoch_loss}')
+        wandb.log({"avg_epoch_loss": avg_epoch_loss, "epoch": epoch + 1})
+
+    wandb.finish()
 
 if __name__ == "__main__":
     from jsonargparse import CLI
