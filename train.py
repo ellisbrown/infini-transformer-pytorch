@@ -3,7 +3,7 @@ from infini_transformer_pytorch import (
     InfiniTransformer,
     InfiniTransformerWrapper
 )
-import tqdm
+from tqdm import tqdm, trange
 import gzip
 import numpy as np
 import torch
@@ -12,12 +12,13 @@ from torch.utils.data import DataLoader, Dataset
 
 @dataclass
 class Config:
-    num_batches: int = int(1e5)
+    num_epochs: int = 10
     batch_size: int = 4
     gradient_accumulate_every: int = 4
     learning_rate: float = 2e-4
-    validate_every: int = 100
-    generate_every: int = 250
+    validate_every: int = 50
+    generate_every: int = 25
+    print_every: int = 10
     prime_len: int = 100
     seq_len: int = 1024
     segment_length: int = 128
@@ -37,11 +38,6 @@ def main(config: Config):
     print(f"Effective batch size: {config.batch_size * config.gradient_accumulate_every}")
 
     # helpers
-    def cycle(loader):
-        while True:
-            for data in loader:
-                yield data
-
     def decode_token(token):
         return str(chr(max(32, token)))
 
@@ -86,46 +82,53 @@ def main(config: Config):
 
     train_dataset = TextSamplerDataset(data_train, config.seq_len)
     val_dataset = TextSamplerDataset(data_val, config.seq_len)
-    train_loader = cycle(DataLoader(train_dataset, batch_size=config.batch_size))
-    val_loader = cycle(DataLoader(val_dataset, batch_size=1))
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
     # optimizer
     optim = Adam(model.parameters(), lr=config.learning_rate)
 
     # training
-    for i in tqdm.tqdm(range(config.num_batches), mininterval=10.):
+    for epoch in trange(config.num_epochs, desc="Epochs"):
+        model.train()
+        epoch_loss = 0
+        for i, batch in enumerate(tqdm(train_loader, desc="Batches", mininterval=10.)):
+            for __ in range(config.gradient_accumulate_every):
+                loss = wrapper(
+                    batch,
+                    backward=True,
+                    grad_accum_scale=config.gradient_accumulate_every ** -1.
+                )
 
-        for __ in range(config.gradient_accumulate_every):
-            loss = wrapper(
-                next(train_loader),
-                backward=True,
-                grad_accum_scale=config.gradient_accumulate_every ** -1.
-            )
+            epoch_loss += loss.item()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            optim.step()
+            optim.zero_grad()
 
-        print(f'training loss: {loss.item()}')
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optim.step()
-        optim.zero_grad()
+            if i % config.print_every == 0:
+                print(f'Step {i}, Training loss: {loss.item()}')
 
-        if i % config.validate_every == 0:
-            with torch.no_grad():
-                wrapper.eval()
-                loss = wrapper(next(val_loader))
-                print(f'validation loss: {loss.item()}')
+            if i % config.validate_every == 0:
+                with torch.no_grad():
+                    model.eval()
+                    val_loss = wrapper(next(iter(val_loader)))
+                    print(f'validation loss: {val_loss.item()}')
 
-        if i % config.generate_every == 0:
-            ids = next(val_loader)[:, :config.prime_len]
-            prime = decode_tokens(ids.flatten())
-            print('%s \n\n %s', (prime, '*' * 100))
+            if i % config.generate_every == 0:
+                ids = next(iter(val_loader))[:, :config.prime_len]
+                prime = decode_tokens(ids.flatten())
+                print('%s \n\n %s', (prime, '*' * 100))
 
-            sample = wrapper.generate(
-                prompt=ids,
-                seq_len=config.seq_len
-            )
+                sample = wrapper.generate(
+                    prompt=ids,
+                    seq_len=config.seq_len
+                )
 
-            decoded_string = decode_tokens(sample.flatten())
-            print(decoded_string)
-            print("\n")
+                decoded_string = decode_tokens(sample.flatten())
+                print(decoded_string)
+                print("\n")
+
+        print(f'Epoch {epoch + 1}/{config.num_epochs}, Training Loss: {epoch_loss / len(train_loader)}')
 
 if __name__ == "__main__":
     from jsonargparse import CLI
