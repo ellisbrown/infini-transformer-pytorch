@@ -5,11 +5,12 @@ from infini_transformer_pytorch import (
 )
 from tqdm import tqdm, trange
 import torch
-from torch.optim import Adam
+from torch import nn, optim, Tensor
 from torch.utils.data import DataLoader, Dataset
 import wandb
 from datasets import load_dataset
 from transformers import AutoTokenizer
+from itertools import chain
 
 @dataclass
 class Config:
@@ -25,7 +26,6 @@ class Config:
     tokenizer_name: str = 'gpt2'
     dataset_name: str = 'Salesforce/wikitext'
     dataset_version: str = 'wikitext-2-raw-v1'
-    num_tokens: int = 50265  # Typical vocab size for BPE
     dim: int = 512
     depth: int = 8
     dim_head: int = 64
@@ -35,49 +35,76 @@ class Config:
     wandb_project: str = "infini-transformer-pytorch"
 
 def main(config: Config):
-
     wandb.init(project=config.wandb_project, config=config)
-
     print(config)
-
     print(f"Effective batch size: {config.batch_size * config.gradient_accumulate_every}")
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+    config.num_tokens = len(tokenizer)  # Dynamically set num_tokens
 
     # Load dataset
     dataset = load_dataset(config.dataset_name, config.dataset_version)
-    train_data = dataset['train']
-    valid_data = dataset['validation']
-
-    # Tokenize dataset
+    
+    # Tokenize function
     def tokenize_function(examples):
-        return tokenizer(examples['text'], return_special_tokens_mask=True, truncation=True, max_length=config.seq_len)
+        return tokenizer(examples['text'], return_attention_mask=False, truncation=False)
 
-    train_data = train_data.map(tokenize_function, batched=True)
-    valid_data = valid_data.map(tokenize_function, batched=True)
+    # Tokenize datasets
+    tokenized_datasets = dataset.map(
+        tokenize_function,
+        batched=True,
+        num_proc=16,
+        remove_columns=['text'],
+        desc="Running tokenizer on dataset",
+    )
+
+    block_size = config.seq_len
+
+    # Main data processing function
+    def group_texts(examples):
+        # Concatenate all texts
+        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, and if the total_length < block_size we exclude this batch
+        total_length = (total_length // block_size) * block_size
+        # Split by chunks of max_len
+        result = {
+            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
+        }
+        result["labels"] = result["input_ids"].copy()
+        return result
+
+    # Apply group_texts to the datasets
+    lm_datasets = tokenized_datasets.map(
+        group_texts,
+        batched=True,
+        num_proc=4,
+        desc=f"Grouping texts in chunks of {block_size}",
+    )
+
+    train_data = lm_datasets["train"]
+    valid_data = lm_datasets["validation"]
 
     # Prepare PyTorch datasets
-    class TokenizedDataset(Dataset):
-        def __init__(self, encodings):
-            self.encodings = encodings
+    class LMDataset(Dataset):
+        def __init__(self, dataset):
+            self.dataset = dataset
 
         def __getitem__(self, idx):
-            item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
-            return item
+            item = self.dataset[idx]
+            return {key: torch.tensor(val) for key, val in item.items()}
 
         def __len__(self):
-            return len(self.encodings['input_ids'])
+            return len(self.dataset)
 
-    train_dataset = TokenizedDataset(train_data)
-    val_dataset = TokenizedDataset(valid_data)
+    train_dataset = LMDataset(train_data)
+    val_dataset = LMDataset(valid_data)
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
 
     # helpers
-    def decode_token(token):
-        return tokenizer.decode(token)
-
     def decode_tokens(tokens):
         return tokenizer.decode(tokens)
 
@@ -98,7 +125,7 @@ def main(config: Config):
     ).cuda()
 
     # optimizer
-    optim = Adam(model.parameters(), lr=config.learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
 
     # training
     for epoch in trange(config.num_epochs, desc="Epochs"):
@@ -115,25 +142,29 @@ def main(config: Config):
 
             epoch_loss += loss.item()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-            optim.step()
-            optim.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
 
             if i % config.print_every == 0:
                 print(f'Step {i}, Training loss: {loss.item()}')
                 wandb.log({"training_loss": loss.item(), "step": i + epoch * len(train_loader)})
 
             if i % config.validate_every == 0:
+                model.eval()
+                val_loss = 0
                 with torch.no_grad():
-                    model.eval()
-                    val_batch = next(iter(val_loader))
-                    val_loss = wrapper(val_batch['input_ids'].cuda())
-                    print(f'Validation loss: {val_loss.item()}')
-                    wandb.log({"validation_loss": val_loss.item(), "step": i + epoch * len(train_loader)})
-                    model.train()
+                    for val_batch in val_loader:
+                        val_input_ids = val_batch['input_ids'].cuda()
+                        val_loss += wrapper(val_input_ids).item()
+                val_loss /= len(val_loader)
+                print(f'Validation loss: {val_loss}')
+                wandb.log({"validation_loss": val_loss, "step": i + epoch * len(train_loader)})
+                model.train()
 
             if i % config.generate_every == 0:
+                model.eval()
                 ids = next(iter(val_loader))['input_ids'][:, :config.prime_len].cuda()
-                prime = decode_tokens(ids.flatten().tolist())
+                prime = decode_tokens(ids[0].tolist())
                 print('%s \n\n %s' % (prime, '*' * 100))
 
                 sample = wrapper.generate(
@@ -141,10 +172,11 @@ def main(config: Config):
                     seq_len=config.seq_len
                 )
 
-                decoded_string = decode_tokens(sample.flatten().tolist())
+                decoded_string = decode_tokens(sample[0].tolist())
                 print(decoded_string)
                 print("\n")
                 wandb.log({"generated_text": decoded_string, "step": i + epoch * len(train_loader)})
+                model.train()
 
         avg_epoch_loss = epoch_loss / len(train_loader)
         print(f'Epoch {epoch + 1}/{config.num_epochs}, Training Loss: {avg_epoch_loss}')
