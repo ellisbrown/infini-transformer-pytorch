@@ -29,8 +29,6 @@ dependencies = [
     'rotary-embedding-torch>=0.6.0',
     'torch>=2.0',
     'tqdm',
-    'numpy',
-    'jsonargparse'
 ]
 
 [project.urls]
@@ -41,6 +39,13 @@ Repository = "https://github.com/lucidrains/infini-transformer-pytorch"
 examples = [
     "tqdm",
     "numpy"
+]
+train = [
+    'numpy',
+    'jsonargparse',
+    'wandb',
+    'transformers',
+    'datasets',
 ]
 
 [build-system]

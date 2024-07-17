@@ -12,6 +12,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from itertools import chain
 
+
 @dataclass
 class Config:
     num_epochs: int = 10
@@ -34,14 +35,30 @@ class Config:
     print_every: int = 10
     wandb_project: str = "infini-transformer-pytorch"
 
+
+class LMDataset(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        return {key: torch.tensor(val) for key, val in item.items()}
+
+    def __len__(self):
+        return len(self.dataset)
+
+
 def main(config: Config):
-    wandb.init(project=config.wandb_project, config=config)
-    print(config)
-    print(f"Effective batch size: {config.batch_size * config.gradient_accumulate_every}")
+    config.effective_batch_size = config.batch_size * config.gradient_accumulate_every
+    print(f"Effective batch size: {config.effective_batch_size}")
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
     config.num_tokens = len(tokenizer)  # Dynamically set num_tokens
+
+    # Initialize wandb
+    wandb.init(project=config.wandb_project, config=config)
+    print(config)
 
     # Load dataset
     dataset = load_dataset(config.dataset_name, config.dataset_version)
@@ -84,23 +101,13 @@ def main(config: Config):
         desc=f"Grouping texts in chunks of {block_size}",
     )
 
+    # Prepare PyTorch datasets
     train_data = lm_datasets["train"]
     valid_data = lm_datasets["validation"]
 
-    # Prepare PyTorch datasets
-    class LMDataset(Dataset):
-        def __init__(self, dataset):
-            self.dataset = dataset
-
-        def __getitem__(self, idx):
-            item = self.dataset[idx]
-            return {key: torch.tensor(val) for key, val in item.items()}
-
-        def __len__(self):
-            return len(self.dataset)
-
     train_dataset = LMDataset(train_data)
     val_dataset = LMDataset(valid_data)
+
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
 
@@ -164,6 +171,9 @@ def main(config: Config):
             if i % config.generate_every == 0:
                 model.eval()
                 ids = next(iter(val_loader))['input_ids'][:, :config.prime_len].cuda()
+                # get some random ids from the validation set
+                # start_idx = torch.randint(0, len(valid_data) - config.prime_len, (1,)).item()
+                # ids = val_dataset[start_idx]['input_ids'].unsqueeze(0).cuda()
                 prime = decode_tokens(ids[0].tolist())
                 print('%s \n\n %s' % (prime, '*' * 100))
 
@@ -181,6 +191,10 @@ def main(config: Config):
         avg_epoch_loss = epoch_loss / len(train_loader)
         print(f'Epoch {epoch + 1}/{config.num_epochs}, Training Loss: {avg_epoch_loss}')
         wandb.log({"avg_epoch_loss": avg_epoch_loss, "epoch": epoch + 1})
+
+    # save the model
+    torch.save(model.state_dict(), "model.pth")
+    print(f"Model saved to model.pth")
 
     wandb.finish()
 
