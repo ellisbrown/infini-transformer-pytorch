@@ -4,12 +4,12 @@ from infini_transformer_pytorch import (
     InfiniTransformerWrapper
 )
 from tqdm import tqdm, trange
-import gzip
-import numpy as np
 import torch
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
 import wandb
+from datasets import load_dataset
+from transformers import AutoTokenizer
 
 @dataclass
 class Config:
@@ -22,8 +22,10 @@ class Config:
     prime_len: int = 100
     seq_len: int = 1024
     segment_length: int = 128
-    data_path: str = './data/enwik8.gz'
-    num_tokens: int = 256
+    tokenizer_name: str = 'gpt2'
+    dataset_name: str = 'Salesforce/wikitext'
+    dataset_version: str = 'wikitext-2-raw-v1'
+    num_tokens: int = 50265  # Typical vocab size for BPE
     dim: int = 512
     depth: int = 8
     dim_head: int = 64
@@ -40,12 +42,44 @@ def main(config: Config):
 
     print(f"Effective batch size: {config.batch_size * config.gradient_accumulate_every}")
 
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+
+    # Load dataset
+    dataset = load_dataset(config.dataset_name, config.dataset_version)
+    train_data = dataset['train']
+    valid_data = dataset['validation']
+
+    # Tokenize dataset
+    def tokenize_function(examples):
+        return tokenizer(examples['text'], return_special_tokens_mask=True, truncation=True, max_length=config.seq_len)
+
+    train_data = train_data.map(tokenize_function, batched=True)
+    valid_data = valid_data.map(tokenize_function, batched=True)
+
+    # Prepare PyTorch datasets
+    class TokenizedDataset(Dataset):
+        def __init__(self, encodings):
+            self.encodings = encodings
+
+        def __getitem__(self, idx):
+            item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+            return item
+
+        def __len__(self):
+            return len(self.encodings['input_ids'])
+
+    train_dataset = TokenizedDataset(train_data)
+    val_dataset = TokenizedDataset(valid_data)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+
     # helpers
     def decode_token(token):
-        return str(chr(max(32, token)))
+        return tokenizer.decode(token)
 
     def decode_tokens(tokens):
-        return ''.join(list(map(decode_token, tokens)))
+        return tokenizer.decode(tokens)
 
     # instantiate GPT-like decoder model
     model = InfiniTransformer(
@@ -63,31 +97,6 @@ def main(config: Config):
         detach_mems_every_num_segments=2
     ).cuda()
 
-    # prepare enwik8 data
-    with gzip.open(config.data_path) as file:
-        x = np.frombuffer(file.read(int(95e6)), dtype=np.uint8).copy()
-        train_x, valid_x = np.split(x, [int(90e6)])
-        data_train, data_val = map(torch.from_numpy, (train_x, valid_x))
-
-    class TextSamplerDataset(Dataset):
-        def __init__(self, data, seq_len):
-            super().__init__()
-            self.data = data
-            self.seq_len = seq_len
-
-        def __getitem__(self, index):
-            rand_start = torch.randint(0, self.data.size(0) - self.seq_len, (1,))
-            full_seq = self.data[rand_start: rand_start + self.seq_len].long()
-            return full_seq.cuda()
-
-        def __len__(self):
-            return self.data.size(0) // self.seq_len
-
-    train_dataset = TextSamplerDataset(data_train, config.seq_len)
-    val_dataset = TextSamplerDataset(data_val, config.seq_len)
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
-
     # optimizer
     optim = Adam(model.parameters(), lr=config.learning_rate)
 
@@ -97,8 +106,9 @@ def main(config: Config):
         epoch_loss = 0
         for i, batch in enumerate(tqdm(train_loader, desc="Batches", mininterval=10.)):
             for __ in range(config.gradient_accumulate_every):
+                input_ids = batch['input_ids'].cuda()
                 loss = wrapper(
-                    batch,
+                    input_ids,
                     backward=True,
                     grad_accum_scale=config.gradient_accumulate_every ** -1.
                 )
@@ -115,14 +125,15 @@ def main(config: Config):
             if i % config.validate_every == 0:
                 with torch.no_grad():
                     model.eval()
-                    val_loss = wrapper(next(iter(val_loader)))
+                    val_batch = next(iter(val_loader))
+                    val_loss = wrapper(val_batch['input_ids'].cuda())
                     print(f'Validation loss: {val_loss.item()}')
                     wandb.log({"validation_loss": val_loss.item(), "step": i + epoch * len(train_loader)})
                     model.train()
 
             if i % config.generate_every == 0:
-                ids = next(iter(val_loader))[:, :config.prime_len]
-                prime = decode_tokens(ids.flatten())
+                ids = next(iter(val_loader))['input_ids'][:, :config.prime_len].cuda()
+                prime = decode_tokens(ids.flatten().tolist())
                 print('%s \n\n %s' % (prime, '*' * 100))
 
                 sample = wrapper.generate(
@@ -130,7 +141,7 @@ def main(config: Config):
                     seq_len=config.seq_len
                 )
 
-                decoded_string = decode_tokens(sample.flatten())
+                decoded_string = decode_tokens(sample.flatten().tolist())
                 print(decoded_string)
                 print("\n")
                 wandb.log({"generated_text": decoded_string, "step": i + epoch * len(train_loader)})
