@@ -43,6 +43,7 @@ class Config:
     wandb_project: str = "infini-transformer-pytorch"
     seed: int = 42
     save_dir: str = "checkpoints"
+    save_every: int = 5 # save every n epochs
 
 
 class LMDataset(Dataset):
@@ -85,7 +86,11 @@ def main(config: Config):
         logger.info(f"Config: {config}")
 
     # Load dataset
-    dataset = load_dataset(config.dataset_name, config.dataset_version)
+    dataset = load_dataset(
+        config.dataset_name,
+        config.dataset_version,
+        trust_remote_code=True
+    )
     
     # Tokenize function
     def tokenize_function(examples):
@@ -222,10 +227,14 @@ def main(config: Config):
             logger.info(f'Epoch {epoch + 1}/{config.num_epochs}, Average Training Loss: {avg_epoch_loss}')
             wandb.log({"avg_epoch_loss": avg_epoch_loss, "epoch": epoch + 1})
 
+            if (epoch + 1) % config.save_every == 0:
+                ckpt_path = os.path.join(config.save_dir, wandb.run.name, f"model_epoch_{epoch + 1}.pth")
+                accelerator.save(wrapper.state_dict(), ckpt_path)
+
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         # save the model
-        ckpt_path = os.path.join(config.save_dir, wandb.run.name, "model.pth")
+        ckpt_path = os.path.join(config.save_dir, wandb.run.name, "final.pth")
         accelerator.save(wrapper.state_dict(), ckpt_path)
         wandb.finish()
 
