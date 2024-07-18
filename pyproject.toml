@@ -46,6 +46,8 @@ train = [
     'wandb',
     'transformers',
     'datasets',
+    'accelerate',
+    'ezcolorlog',
 ]
 
 [build-system]

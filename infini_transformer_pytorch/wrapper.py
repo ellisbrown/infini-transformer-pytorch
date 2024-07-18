@@ -10,10 +10,13 @@ import torch.nn.functional as F
 from einops import pack, rearrange
 from tqdm import tqdm
 
+from accelerate import Accelerator
+
 from infini_transformer_pytorch.infini_transformer import (
     InfiniTransformer,
     detach_memories_
 )
+
 
 # helper functions
 
@@ -77,10 +80,12 @@ class InfiniTransformerWrapper(Module):
         model: InfiniTransformer,
         segment_length = 512,
         detach_mems_every_num_segments = 2,
-        ignore_index = -1
+        ignore_index = -1,
+        accelerator: Accelerator = None
     ):
         super().__init__()
         self.model = model
+        self.accelerator = accelerator
 
         self.segment_length = segment_length
         self.detach_mems_every_num_segments = detach_mems_every_num_segments
@@ -228,7 +233,10 @@ class InfiniTransformerWrapper(Module):
             # perform backwards every `(num_segment * detach_mems_every_num_segments)`
 
             if should_backward:
-                (running_loss / grad_accum_scale).backward()
+                if self.accelerator:
+                    self.accelerator.backward(running_loss / grad_accum_scale)
+                else:
+                    (running_loss / grad_accum_scale).backward()
                 running_loss = 0.
 
             # detach memories if need be
