@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 from infini_transformer_pytorch import (
     InfiniTransformer,
     InfiniTransformerWrapper
@@ -23,17 +24,19 @@ class Config:
     generate_every: int = 25
     prime_len: int = 100
     seq_len: int = 1024
+    gen_seq_len: int = 1024
     segment_length: int = 128
     tokenizer_name: str = 'gpt2'
     dataset_name: str = 'Salesforce/wikitext'
     dataset_version: str = 'wikitext-2-raw-v1'
-    dim: int = 512
     depth: int = 8
+    dim: int = 512
     dim_head: int = 64
     heads: int = 8
     use_mem_delta_rule: bool = True
     print_every: int = 10
     wandb_project: str = "infini-transformer-pytorch"
+    save_dir: str = "checkpoints"
 
 
 class LMDataset(Dataset):
@@ -109,7 +112,8 @@ def main(config: Config):
     val_dataset = LMDataset(valid_data)
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+    # shuffle true on val loader to get random samples for generation
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=True)
 
     # helpers
     def decode_tokens(tokens):
@@ -171,15 +175,12 @@ def main(config: Config):
             if i % config.generate_every == 0:
                 model.eval()
                 ids = next(iter(val_loader))['input_ids'][:, :config.prime_len].cuda()
-                # get some random ids from the validation set
-                # start_idx = torch.randint(0, len(valid_data) - config.prime_len, (1,)).item()
-                # ids = val_dataset[start_idx]['input_ids'].unsqueeze(0).cuda()
                 prime = decode_tokens(ids[0].tolist())
                 print('%s \n\n %s' % (prime, '*' * 100))
 
                 sample = wrapper.generate(
                     prompt=ids,
-                    seq_len=config.seq_len
+                    seq_len=config.gen_seq_len
                 )
 
                 decoded_string = decode_tokens(sample[0].tolist())
@@ -193,8 +194,9 @@ def main(config: Config):
         wandb.log({"avg_epoch_loss": avg_epoch_loss, "epoch": epoch + 1})
 
     # save the model
-    torch.save(model.state_dict(), "model.pth")
-    print(f"Model saved to model.pth")
+    ckpt_path = os.path.join(config.save_dir, wandb.run.name, "model.pth")
+    torch.save(model.state_dict(), ckpt_path)
+    print(f"Model saved to {ckpt_path}")
 
     wandb.finish()
 
