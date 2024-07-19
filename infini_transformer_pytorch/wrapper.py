@@ -124,7 +124,8 @@ class InfiniTransformerWrapper(Module):
         cached_kv = None
         past_memories = None
 
-        for curr_len in tqdm(range(init_len, seq_len)):
+        show = self.accelerator is None or self.accelerator.is_main_process
+        for curr_len in tqdm(range(init_len, seq_len), disable = not show):
 
             # what is fed into the model is always at the start of the very last segment
 
@@ -192,7 +193,7 @@ class InfiniTransformerWrapper(Module):
         total_loss = 0.
         past_memories = None
 
-        running_loss = 0.
+        running_loss = 0.  # for gradient accumulation
 
         for ind, (segment_seq, segment_label) in enumerate(zip(split_seq, split_label)):
             segment_num = ind + 1

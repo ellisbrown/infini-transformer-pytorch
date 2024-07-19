@@ -26,7 +26,7 @@ class Config:
     gradient_accumulate_every: int = 4
     learning_rate: float = 2e-4
     validate_every: int = 50
-    generate_every: int = 25
+    generate_every: int = 50
     prime_len: int = 100
     seq_len: int = 1024
     gen_seq_len: int = 1024
@@ -112,6 +112,7 @@ def main(config: Config):
         # Concatenate all texts
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
+        
         # We drop the small remainder, and if the total_length < block_size we exclude this batch
         total_length = (total_length // block_size) * block_size
         # Split by chunks of max_len
@@ -188,38 +189,52 @@ def main(config: Config):
 
             # accumulate loss
             epoch_loss += loss.item()
+            
+            # log
+            """NOTE:
+            had issues when only main proc did gen/val, so moved it to all procs
+            but still only log from main proc
+            """
+            logs = {}
 
-            if accelerator.is_main_process:
-                if i % config.print_every == 0:
-                    logger.info(f'Step {i}, Training loss: {loss.item()}')
-                    wandb.log({"training_loss": loss.item(), "step": i + epoch * len(train_loader)})
+            if i % config.print_every == 0:
+                logger.info(f'[i={i}]\tTraining loss: {loss.item()}')
+                logs["training_loss"] = loss.item()
 
-                if i % config.validate_every == 0:
-                    model.eval()
-                    val_loss = 0
-                    for val_batch in val_loader:
-                        with torch.no_grad():
-                            val_input_ids = val_batch['input_ids']
-                            val_loss += wrapper(val_input_ids).item()
-                    val_loss /= len(val_loader)
-                    logger.info(f'Validation loss: {val_loss}')
-                    wandb.log({"validation_loss": val_loss, "step": i + epoch * len(train_loader)})
-                    model.train()
+            if i % config.validate_every == 0:
+                model.eval()
+                val_loss = 0
+                with torch.no_grad():
+                    for val_batch in tqdm(val_loader, desc=f"[i={i}] Validation", mininterval=10., disable=not accelerator.is_main_process):
+                        val_input_ids = val_batch['input_ids']
+                        val_loss += wrapper(val_input_ids).item()
+                val_loss /= len(val_loader)
+                logs["validation_loss"] = val_loss
+                model.train()
 
-                if i % config.generate_every == 0:
-                    model.eval()
-                    # get a random batch for generation
-                    gen_batch = next(iter(val_loader))
-                    prompt = gen_batch['input_ids'][:1, :config.prime_len].to(device)
-                    generated = wrapper.generate(
-                        prompt=prompt,
-                        seq_len=config.gen_seq_len
-                    )
-                    decoded = tokenizer.decode(generated[0])
-                    logger.info(f"PROMPT:\n{decode_tokens(prompt[0])}\n\nGENERATED: {decoded}\n")
-                    wandb.log({"generated_text": decoded, "step": i + epoch * len(train_loader)})
-                    model.train()
+            if i % config.generate_every == 0:
+                model.eval()
+                # get a random batch for generation
+                gen_batch = next(iter(val_loader))
+                prompt = gen_batch['input_ids'][:1, :config.prime_len].to(device)
+                generated = wrapper.generate(
+                    prompt=prompt,
+                    seq_len=config.gen_seq_len
+                )
+                decoded = tokenizer.decode(generated[0])
+                logs["generated_text"] = f"PROMPT:\n{decode_tokens(prompt[0])}\n\nGENERATED: {decoded}"
+                model.train()
+            
+            if len(logs) > 0:
+                logs["step"] = i + epoch * len(train_loader)
+                if accelerator.is_main_process:
+                    log_str = "\n\t - ".join([f"{k}: {v}" for k, v in logs.items()])
+                    logger.warning(f"[i={i}]\tLogs:\n\t - {log_str}")
+                    wandb.log(logs, step=i + epoch * len(train_loader))
 
+                # logger.info(f'[i={i}]\tWaiting for everyone...')
+                accelerator.wait_for_everyone()
+                # logger.info(f'[i={i}]\tContinuing...')
 
         # Calculate and log average epoch loss
         avg_epoch_loss = epoch_loss / len(train_loader)
@@ -230,12 +245,20 @@ def main(config: Config):
             if (epoch + 1) % config.save_every == 0:
                 ckpt_path = os.path.join(config.save_dir, wandb.run.name, f"model_epoch_{epoch + 1}.pth")
                 accelerator.save(wrapper.state_dict(), ckpt_path)
+                logger.error(f"Model saved at {ckpt_path}")
 
-    accelerator.wait_for_everyone()
+        accelerator.wait_for_everyone()
+
     if accelerator.is_main_process:
         # save the model
+
         ckpt_path = os.path.join(config.save_dir, wandb.run.name, "final.pth")
-        accelerator.save(wrapper.state_dict(), ckpt_path)
+
+        # unwrap the model
+        model = accelerator.unwrap_model(wrapper.model)
+        state_dict = model.state_dict()
+        accelerator.save(state_dict, ckpt_path)
+        
         wandb.finish()
 
 

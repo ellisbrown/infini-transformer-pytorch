@@ -8,7 +8,7 @@ accelerate launch train_accel.py \
     --dim_head 128 \
     --segment_len 1024 \
     --seq_len 4096 \
-    --gen_seq_len 2048 \
+    --gen_seq_len 512 \
     --dataset_version wikitext-103-raw-v1
 
     # --dataset_name deepmind/pg19 \
