@@ -19,6 +19,11 @@ import torch.distributed as dist
 from ezcolorlog import root_logger as logger
 
 
+# # NCCL debugs
+# os.environ['NCCL_DEBUG'] = 'INFO'
+# os.environ['NCCL_IB_DISABLE'] = '1'
+# os.environ['NCCL_P2P_LEVEL'] = 'PX'
+
 @dataclass
 class Config:
     num_epochs: int = 10
@@ -43,7 +48,8 @@ class Config:
     wandb_project: str = "infini-transformer-pytorch"
     seed: int = 42
     save_dir: str = "checkpoints"
-    save_every: int = 5 # save every n epochs
+    save_every: int = 1 # save every n epochs
+    precision: str = "bf16"
 
 
 class LMDataset(Dataset):
@@ -61,7 +67,7 @@ class LMDataset(Dataset):
 def main(config: Config):
 
     # Initialize accelerator
-    accelerator = Accelerator()
+    accelerator = Accelerator(mixed_precision=config.precision)
     device = accelerator.device
 
     config.effective_batch_size = config.batch_size * accelerator.num_processes * config.gradient_accumulate_every

@@ -2,6 +2,7 @@
 
 accelerate launch train_accel.py \
     --batch_size 8 \
+    --gradient_accumulate_every 16 \
     --num_epochs 100 \
     --depth 12 \
     --dim 1024 \
