@@ -46,6 +46,7 @@ class Config:
     use_mem_delta_rule: bool = True
     print_every: int = 10
     wandb_project: str = "infini-transformer-pytorch"
+    wandb_run_name: str = None
     seed: int = 42
     save_dir: str = "checkpoints"
     save_every: int = 1 # save every n epochs
@@ -88,7 +89,7 @@ def main(config: Config):
         logger.warning(f"Effective batch size: {config.effective_batch_size}")
 
         # Initialize wandb
-        wandb.init(project=config.wandb_project, config=config)
+        wandb.init(project=config.wandb_project, config=config, name=config.wandb_run_name)
         logger.info(f"Config: {config}")
 
     # Load dataset
@@ -106,7 +107,7 @@ def main(config: Config):
     tokenized_datasets = dataset.map(
         tokenize_function,
         batched=True,
-        num_proc=16,
+        num_proc=48,
         remove_columns=['text'],
         desc="Running tokenizer on dataset",
     )
@@ -133,7 +134,7 @@ def main(config: Config):
     lm_datasets = tokenized_datasets.map(
         group_texts,
         batched=True,
-        num_proc=4,
+        num_proc=48,
         desc=f"Grouping texts in chunks of {block_size}",
     )
 
@@ -250,6 +251,7 @@ def main(config: Config):
 
             if (epoch + 1) % config.save_every == 0:
                 ckpt_path = os.path.join(config.save_dir, wandb.run.name, f"model_epoch_{epoch + 1}.pth")
+                os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
                 accelerator.save(wrapper.state_dict(), ckpt_path)
                 logger.error(f"Model saved at {ckpt_path}")
 
@@ -259,6 +261,7 @@ def main(config: Config):
         # save the model
 
         ckpt_path = os.path.join(config.save_dir, wandb.run.name, "final.pth")
+        os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
 
         # unwrap the model
         model = accelerator.unwrap_model(wrapper.model)

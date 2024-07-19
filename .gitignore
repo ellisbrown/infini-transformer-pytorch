@@ -1,5 +1,6 @@
 wandb/
 *.pth
+.nv/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

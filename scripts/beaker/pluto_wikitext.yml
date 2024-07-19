@@ -1,0 +1,54 @@
+version: v2
+budget: ai2/prior
+description: train-infini-attention-wikitext103-100ep
+tasks:
+- name: train-infini-attention-wikitext103-100ep
+  image:
+    beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
+  command: ['/bin/bash', '-c']
+  arguments:
+  - >-
+    cd /nfs/ellisb/infini-transformer-pytorch &&
+    ./env/bin/accelerate launch
+    --mixed_precision bf16
+    train_accel.py
+    --batch_size 16
+    --gradient_accumulate_every 16
+    --num_epochs 100
+    --depth 12
+    --dim 1024
+    --dim_head 128
+    --segment_len 1024
+    --seq_len 4096
+    --gen_seq_len 512
+    --dataset_version wikitext-103-raw-v1
+    --wandb_run_name "train-infini-attention-wikitext103-100ep"
+  datasets:
+  - mountPath: /nfs
+    source:
+      hostPath: /net/nfs/prior
+  - mountPath: /root
+    source:
+      hostPath: /net/nfs/prior/ellisb/infini-transformer-pytorch
+  result:
+    path: /data/results
+  envVars:
+  - name: GITHUB_TOKEN
+    secret: GITHUB_TOKEN
+  - name: WANDB_API_KEY
+    secret: WANDB_API_KEY
+  - name: OPENAI_API_KEY
+    secret: OPENAI_API_KEY
+  - name: HF_TOKEN
+    secret: HF_TOKEN
+  - name: HF_HOME
+    value: /nfs/ellisb/hf
+  resources:
+    gpuCount: 8
+  context:
+    priority: normal
+    preemptible: true
+  constraints:
+    cluster:
+    - ai2/pluto-cirrascale  # NVIDIA H100 80GB HBM3
+  hostNetworking: true
