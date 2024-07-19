@@ -9,7 +9,7 @@ import torch
 from torch import nn, optim, Tensor
 from torch.utils.data import DataLoader, Dataset
 import wandb
-from datasets import load_dataset
+from datasets import load_dataset, DatasetDict
 from transformers import AutoTokenizer
 from itertools import chain
 from accelerate import Accelerator
@@ -93,21 +93,30 @@ def main(config: Config):
         logger.info(f"Config: {config}")
 
     # Load dataset
-    dataset = load_dataset(
-        config.dataset_name,
-        config.dataset_version,
+    # datasets = load_dataset(
+    #     config.dataset_name,
+    #     config.dataset_version,
+    #     trust_remote_code=True
+    # )
+    dataset_args = dict(
+        path=config.dataset_name,
+        name=config.dataset_version,
         trust_remote_code=True
     )
-    
+    datasets = DatasetDict(dict(
+        train=load_dataset(split='train', **dataset_args),
+        validation=load_dataset(split='validation', **dataset_args),
+    ))
+
     # Tokenize function
     def tokenize_function(examples):
         return tokenizer(examples['text'], return_attention_mask=False, truncation=False)
 
     # Tokenize datasets
-    tokenized_datasets = dataset.map(
+    tokenized_datasets = datasets.map(
         tokenize_function,
         batched=True,
-        num_proc=48,
+        num_proc=24,
         remove_columns=['text'],
         desc="Running tokenizer on dataset",
     )
@@ -117,7 +126,7 @@ def main(config: Config):
     # Main data processing function
     def group_texts(examples):
         # Concatenate all texts
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        concatenated_examples = {k: list(chain(*v)) for k, v in examples.items()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
         
         # We drop the small remainder, and if the total_length < block_size we exclude this batch
@@ -131,10 +140,10 @@ def main(config: Config):
         return result
 
     # Apply group_texts to the datasets
-    lm_datasets = tokenized_datasets.map(
+    lm_datasets = tokenized_datasets.select_columns('input_ids').map(
         group_texts,
         batched=True,
-        num_proc=48,
+        num_proc=24,
         desc=f"Grouping texts in chunks of {block_size}",
     )
 
@@ -207,6 +216,7 @@ def main(config: Config):
             if i % config.print_every == 0:
                 logger.info(f'[i={i}]\tTraining loss: {loss.item()}')
                 logs["training_loss"] = loss.item()
+                logs["avg_epoch_loss"] = epoch_loss / (i + 1)
 
             if i % config.validate_every == 0:
                 model.eval()
