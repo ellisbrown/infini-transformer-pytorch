@@ -1,0 +1,56 @@
+version: v2
+budget: ai2/prior
+description: train-infini-attention-c4-10M
+tasks:
+- name: train-infini-attention-c4-10M
+  image:
+    beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
+  command: ['/bin/bash', '-c']
+  arguments:
+  - >-
+    cd /nfs/ellisb/infini-transformer-pytorch &&
+    ./env/bin/accelerate launch
+    --mixed_precision bf16
+    train_accel_streaming.py
+    --batch_size 4
+    --gradient_accumulate_every 16
+    --total_steps 10_000_000
+    --depth 12
+    --heads 8
+    --dim 2048
+    --dim_head 128
+    --segment_len 2048
+    --seq_len 32_768
+    --gen_seq_len 512
+    --dataset_name allenai/c4 
+    --dataset_version en
+    --wandb_run_name "train-infini-attention-c4-10M"
+  datasets:
+  - mountPath: /nfs
+    source:
+      hostPath: /net/nfs/prior
+  - mountPath: /root
+    source:
+      hostPath: /net/nfs/prior/ellisb/infini-transformer-pytorch
+  result:
+    path: /data/results
+  envVars:
+  - name: GITHUB_TOKEN
+    secret: GITHUB_TOKEN
+  - name: WANDB_API_KEY
+    secret: WANDB_API_KEY
+  - name: OPENAI_API_KEY
+    secret: OPENAI_API_KEY
+  - name: HF_TOKEN
+    secret: HF_TOKEN
+  - name: HF_HOME
+    value: /nfs/ellisb/hf
+  resources:
+    gpuCount: 8
+  context:
+    priority: normal
+    preemptible: true
+  constraints:
+    cluster:
+    - ai2/pluto-cirrascale  # NVIDIA H100 80GB HBM3
+  hostNetworking: true

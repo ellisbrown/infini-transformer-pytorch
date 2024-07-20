@@ -15,10 +15,13 @@ from itertools import islice
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from ezcolorlog import root_logger as logger
+from transformers.optimization import Adafactor
+from torch.optim.lr_scheduler import LambdaLR
+import math
 
 import logging
 
-# remove the "Running this sequence through the model will result in indexing errors" warning
+# rm the "Running this sequence through the model will result in indexing errors" warning
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 
@@ -27,7 +30,10 @@ class Config:
     total_steps: int = 100000
     batch_size: int = 4  # per-device batch size
     gradient_accumulate_every: int = 4
-    learning_rate: float = 2e-4
+    learning_rate: float = 1e-2
+    warmup_steps: int = 1000
+    max_lr: float = 0.01
+    min_lr: float = 1e-5
     validate_every: int = 100
     val_steps: int = 100
     generate_every: int = 100
@@ -51,6 +57,7 @@ class Config:
     save_every: int = 5000  # save every n steps
     precision: str = "bf16"
 
+
 class StreamingLMDataset(IterableDataset):
     def __init__(self, dataset, block_size):
         self.dataset = dataset
@@ -63,6 +70,17 @@ class StreamingLMDataset(IterableDataset):
             while len(buffer) >= self.block_size:
                 yield torch.tensor(buffer[:self.block_size])
                 buffer = buffer[self.block_size:]
+
+
+def get_lr_scheduler(optimizer, warmup_steps, total_steps, max_lr, min_lr):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(min_lr, 0.5 * (1.0 + math.cos(math.pi * progress))) * (max_lr - min_lr) + min_lr
+
+    return LambdaLR(optimizer, lr_lambda)
+
 
 def main(config: Config):
     accelerator = Accelerator(mixed_precision=config.precision)
@@ -129,6 +147,24 @@ def main(config: Config):
     )
 
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
+    # optimizer = Adafactor(
+    #     model.parameters(),
+    #     scale_parameter=False,
+    #     relative_step=False,
+    #     warmup_init=False,
+    # )
+
+    lr_scheduler = get_lr_scheduler(
+        optimizer,
+        warmup_steps=config.warmup_steps,
+        total_steps=config.total_steps,
+        max_lr=config.max_lr,
+        min_lr=config.min_lr
+    )
+
+    model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_loader, val_loader, lr_scheduler
+    )
 
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
@@ -154,6 +190,7 @@ def main(config: Config):
             )
             accelerator.clip_grad_norm_(wrapper.parameters(), 0.5)
             optimizer.step()
+            lr_scheduler.step()
             optimizer.zero_grad()
 
         total_loss += loss.item()
@@ -199,6 +236,7 @@ def main(config: Config):
         
         if logs and accelerator.is_main_process:
             logs["step"] = step
+            logs["lr"] = lr_scheduler.get_last_lr()[0]
             log_str = "\n\t - ".join([f"{k}: {v}" for k, v in logs.items()])
             logger.warning(f"[Step={step}]\tLogs:\n\t - {log_str}")
             wandb.log(logs, step=step)
