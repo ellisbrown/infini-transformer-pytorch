@@ -7,22 +7,17 @@ from infini_transformer_pytorch import (
 from tqdm import tqdm, trange
 import torch
 from torch import nn, optim, Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 import wandb
 from datasets import load_dataset, DatasetDict
 from transformers import AutoTokenizer
-from itertools import chain
+from itertools import chain, islice
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 import torch.distributed as dist
 
 from ezcolorlog import root_logger as logger
 
-
-# # NCCL debugs
-# os.environ['NCCL_DEBUG'] = 'INFO'
-# os.environ['NCCL_IB_DISABLE'] = '1'
-# os.environ['NCCL_P2P_LEVEL'] = 'PX'
 
 @dataclass
 class Config:
@@ -31,6 +26,7 @@ class Config:
     gradient_accumulate_every: int = 4
     learning_rate: float = 2e-4
     validate_every: int = 50
+    val_steps: int = 100
     generate_every: int = 50
     prime_len: int = 100
     seq_len: int = 1024
@@ -53,16 +49,18 @@ class Config:
     precision: str = "bf16"
 
 
-class LMDataset(Dataset):
-    def __init__(self, dataset):
+class StreamingLMDataset(IterableDataset):
+    def __init__(self, dataset, block_size):
         self.dataset = dataset
+        self.block_size = block_size
 
-    def __getitem__(self, idx):
-        item = self.dataset[idx]
-        return {key: torch.tensor(val) for key, val in item.items()}
-
-    def __len__(self):
-        return len(self.dataset)
+    def __iter__(self):
+        buffer = []
+        for example in self.dataset:
+            buffer.extend(example['input_ids'])
+            while len(buffer) >= self.block_size:
+                yield torch.tensor(buffer[:self.block_size])
+                buffer = buffer[self.block_size:]
 
 
 def main(config: Config):
@@ -93,70 +91,34 @@ def main(config: Config):
         logger.info(f"Config: {config}")
 
     # Load dataset
-    # datasets = load_dataset(
-    #     config.dataset_name,
-    #     config.dataset_version,
-    #     trust_remote_code=True
-    # )
     dataset_args = dict(
         path=config.dataset_name,
         name=config.dataset_version,
-        trust_remote_code=True
+        trust_remote_code=True,
+        streaming=True
     )
-    datasets = DatasetDict(dict(
-        train=load_dataset(split='train', **dataset_args),
-        validation=load_dataset(split='validation', **dataset_args),
-    ))
+
+    train_dataset = load_dataset(split='train', **dataset_args)
+    validation = load_dataset(split='validation', **dataset_args)
 
     # Tokenize function
     def tokenize_function(examples):
         return tokenizer(examples['text'], return_attention_mask=False, truncation=False)
 
     # Tokenize datasets
-    tokenized_datasets = datasets.map(
-        tokenize_function,
-        batched=True,
-        num_proc=24,
-        remove_columns=['text'],
-        desc="Running tokenizer on dataset",
-    )
+    tok_train = train_dataset.map(tokenize_function, batched=True, remove_columns=['text'])
+    tok_val = validation.map(tokenize_function, batched=True, remove_columns=['text'])
 
-    block_size = config.seq_len
-
-    # Main data processing function
-    def group_texts(examples):
-        # Concatenate all texts
-        concatenated_examples = {k: list(chain(*v)) for k, v in examples.items()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        
-        # We drop the small remainder, and if the total_length < block_size we exclude this batch
-        total_length = (total_length // block_size) * block_size
-        # Split by chunks of max_len
-        result = {
-            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
 
     # Apply group_texts to the datasets
-    lm_datasets = tokenized_datasets.select_columns('input_ids').map(
-        group_texts,
-        batched=True,
-        num_proc=24,
-        desc=f"Grouping texts in chunks of {block_size}",
-    )
+    train_data = tok_train.select_columns('input_ids')
+    val_data = tok_val.select_columns('input_ids')
 
-    # Prepare PyTorch datasets
-    train_data = lm_datasets["train"]
-    valid_data = lm_datasets["validation"]
+    train_dataset = StreamingLMDataset(train_data, config.seq_len)
+    val_dataset = StreamingLMDataset(val_data, config.seq_len)
 
-    train_dataset = LMDataset(train_data)
-    val_dataset = LMDataset(valid_data)
-
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-    # shuffle true on val loader to get random samples for generation
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=4, pin_memory=True)
 
     # helpers
     def decode_tokens(tokens):
@@ -188,14 +150,15 @@ def main(config: Config):
     )
 
     # training
+    steps = 0
     for epoch in trange(config.num_epochs, desc="Epochs", disable=not accelerator.is_main_process):
         model.train()
         epoch_loss = 0
+        i = 0
         for i, batch in enumerate(tqdm(train_loader, desc="Batches", mininterval=10., disable=not accelerator.is_main_process)):
             with accelerator.accumulate(wrapper):
-                input_ids = batch['input_ids']
                 loss = wrapper(
-                    input_ids,
+                    batch,
                     backward=True,
                     grad_accum_scale=1 / config.gradient_accumulate_every
                 )
@@ -221,11 +184,12 @@ def main(config: Config):
             if i % config.validate_every == 0:
                 model.eval()
                 val_loss = 0
+                val_steps = 0
                 with torch.no_grad():
-                    for val_batch in tqdm(val_loader, desc=f"[i={i}] Validation", mininterval=10., disable=not accelerator.is_main_process):
-                        val_input_ids = val_batch['input_ids']
-                        val_loss += wrapper(val_input_ids).item()
-                val_loss /= len(val_loader)
+                    for val_batch in tqdm(islice(val_loader, config.val_steps), desc=f"[i={i}] Validation", mininterval=10., disable=not accelerator.is_main_process):
+                        val_loss += wrapper(val_batch).item()
+                        val_steps += 1
+                val_loss /= val_steps
                 logs["validation_loss"] = val_loss
                 model.train()
 
@@ -233,28 +197,31 @@ def main(config: Config):
                 model.eval()
                 # get a random batch for generation
                 gen_batch = next(iter(val_loader))
-                prompt = gen_batch['input_ids'][:1, :config.prime_len].to(device)
+                prompt = gen_batch[:1, :config.prime_len].to(device)
                 generated = wrapper.generate(
                     prompt=prompt,
                     seq_len=config.gen_seq_len
                 )
+                # log the shapes
                 decoded = tokenizer.decode(generated[0])
                 logs["generated_text"] = f"PROMPT:\n{decode_tokens(prompt[0])}\n\nGENERATED: {decoded}"
                 model.train()
             
             if len(logs) > 0:
-                logs["step"] = i + epoch * len(train_loader)
+                logs["step"] = step
                 if accelerator.is_main_process:
                     log_str = "\n\t - ".join([f"{k}: {v}" for k, v in logs.items()])
                     logger.warning(f"[i={i}]\tLogs:\n\t - {log_str}")
-                    wandb.log(logs, step=i + epoch * len(train_loader))
+                    wandb.log(logs, step=step)
 
                 # logger.info(f'[i={i}]\tWaiting for everyone...')
                 accelerator.wait_for_everyone()
                 # logger.info(f'[i={i}]\tContinuing...')
 
+            steps += 1
+
         # Calculate and log average epoch loss
-        avg_epoch_loss = epoch_loss / len(train_loader)
+        avg_epoch_loss = epoch_loss / (i + 1)
         if accelerator.is_main_process:
             logger.info(f'Epoch {epoch + 1}/{config.num_epochs}, Average Training Loss: {avg_epoch_loss}')
             wandb.log({"avg_epoch_loss": avg_epoch_loss, "epoch": epoch + 1})
