@@ -29,11 +29,11 @@ logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR
 class Config:
     total_steps: int = 100_000
     batch_size: int = 4  # per-device batch size
-    gradient_accumulate_every: int = 4
+    gradient_accumulate_every: int = 4  # per device
     learning_rate: float = 1e-2
     warmup_steps: int = 1000
-    validate_every: int = 100
     val_steps: int = 100
+    validate_every: int = 100
     generate_every: int = 100
     prime_len: int = 100
     seq_len: int = 1024
@@ -64,7 +64,8 @@ class StreamingLMDataset(IterableDataset):
     def __iter__(self):
         buffer = []
         for example in self.dataset:
-            buffer.extend(example['input_ids'])
+            input_ids = example['input_ids']
+            buffer.extend(input_ids)
             while len(buffer) >= self.block_size:
                 yield torch.tensor(buffer[:self.block_size])
                 buffer = buffer[self.block_size:]
@@ -101,8 +102,30 @@ def main(config: Config):
     
     set_seed(config.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
-    config.num_tokens = len(tokenizer)
+    if config.tokenizer_name.startswith("tiktoken-"):
+        import tiktoken
+        tiktoken_name = config.tokenizer_name.replace("tiktoken-", "")
+        logger.info(f"Using tiktoken tokenizer: {tiktoken_name}")
+        tokenizer = tiktoken.get_encoding(tiktoken_name)
+        config.num_tokens = tokenizer.n_vocab
+        
+        def tokenize_function(examples):
+            # logger.error(f"Tokenizing first batch with len: {len(examples['text'])}")
+            # _asdf = tokenizer.encode_ordinary_batch(examples['text'])
+            # logger.error(f"Tokenized first batch with len: {len(_asdf)}")
+            # exit(0)
+            input_ids = tokenizer.encode_ordinary_batch(examples['text'])
+            return dict(input_ids=input_ids)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+        config.num_tokens = len(tokenizer)
+
+        def tokenize_function(examples):
+            return tokenizer(examples['text'], return_attention_mask=False, truncation=False)
+
+    def decode_tokens(tokens):
+        return tokenizer.decode(tokens)
+
 
     logger.info(f"Current process index: {accelerator.process_index}, Device: {device}")
 
@@ -123,9 +146,6 @@ def main(config: Config):
     train_dataset = load_dataset(split='train', **dataset_args)
     validation = load_dataset(split='validation', **dataset_args)
 
-    def tokenize_function(examples):
-        return tokenizer(examples['text'], return_attention_mask=False, truncation=False)
-
     tok_train = train_dataset.map(tokenize_function, batched=True, remove_columns=['text'])
     tok_val = validation.map(tokenize_function, batched=True, remove_columns=['text'])
 
@@ -137,9 +157,6 @@ def main(config: Config):
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=4, pin_memory=True)
-
-    def decode_tokens(tokens):
-        return tokenizer.decode(tokens)
 
     model = InfiniTransformer(
         num_tokens=config.num_tokens,
@@ -183,6 +200,7 @@ def main(config: Config):
     val_iter = iter(val_loader)
 
     total_loss = 0
+    pbar = tqdm(range(config.total_steps), desc="Training", disable=not accelerator.is_main_process)
     for step in tqdm(range(config.total_steps), desc="Training", disable=not accelerator.is_main_process):
         model.train()
         try:
@@ -239,7 +257,7 @@ def main(config: Config):
                 prompt=prompt,
                 seq_len=config.gen_seq_len
             )
-            decoded = tokenizer.decode(generated[0])
+            decoded = decode_tokens(generated[0])
             logs["generated_text"] = f"PROMPT:\n{decode_tokens(prompt[0])}\n\nGENERATED: {decoded}"
             model.train()
         

@@ -48,6 +48,7 @@ train = [
     'datasets',
     'accelerate',
     'ezcolorlog',
+    'tiktoken',
 ]
 
 [build-system]

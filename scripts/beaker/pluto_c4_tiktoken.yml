@@ -1,8 +1,8 @@
 version: v2
 budget: ai2/prior
-description: train-infini-attention-c4-100K-lr5e-4
+description: train-infini-attention-c4-100K-lr5e-4-tiktok-cl100k
 tasks:
-- name: train-infini-attention-c4-100K-lr5e-4
+- name: train-infini-attention-c4-100K-lr5e-4-tiktok-cl100k
   image:
     beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
   command: ['/bin/bash', '-c']
@@ -26,7 +26,8 @@ tasks:
     --gen_seq_len 512
     --dataset_name allenai/c4 
     --dataset_version en
-    --wandb_run_name "train-infini-attention-c4-100K-lr5e-4"
+    --tokenizer_name tiktoken-cl100k_base
+    --wandb_run_name "train-infini-attention-c4-100K-lr5e-4-tiktok-cl100k"
   datasets:
   - mountPath: /nfs
     source:
