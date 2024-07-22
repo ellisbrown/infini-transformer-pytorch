@@ -27,13 +27,11 @@ logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR
 
 @dataclass
 class Config:
-    total_steps: int = 100000
+    total_steps: int = 100_000
     batch_size: int = 4  # per-device batch size
     gradient_accumulate_every: int = 4
     learning_rate: float = 1e-2
     warmup_steps: int = 1000
-    max_lr: float = 0.01
-    min_lr: float = 1e-5
     validate_every: int = 100
     val_steps: int = 100
     generate_every: int = 100

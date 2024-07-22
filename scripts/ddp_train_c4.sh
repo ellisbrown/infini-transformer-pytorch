@@ -31,8 +31,6 @@ accelerate launch \
     --dataset_name allenai/c4 \
     --dataset_version en
 
+    # --dataset_name pg19 \
+    # --dataset_version None
 
-
-ok here's my current code. can you help me reorganize it around the number of steps instead of number of epochs?
-
-with a massive dataset like this, don't want to wait until we've processed all of the data 
