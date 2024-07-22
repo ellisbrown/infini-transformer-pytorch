@@ -72,14 +72,27 @@ class StreamingLMDataset(IterableDataset):
                 buffer = buffer[self.block_size:]
 
 
-def get_lr_scheduler(optimizer, warmup_steps, total_steps, max_lr, min_lr):
-    def lr_lambda(current_step):
+def cosine_with_warmup_lr_scheduler(optimizer, warmup_steps, train_steps, cycles=0.5, last_epoch=-1):
+    """
+    Cosine learning rate scheduler with warm-up.
+
+    Args:
+        optimizer (torch.optim.Optimizer): The optimizer for which to schedule the learning rate.
+        warmup_steps (int): The number of warm-up steps.
+        train_steps (int): The total number of training steps.
+        cycles (float, optional): The number of cycles for the cosine annealing schedule. Default is 0.5.
+        last_epoch (int, optional): The index of the last epoch. Default is -1.
+
+    Returns:
+        torch.optim.lr_scheduler.LambdaLR: The learning rate scheduler.
+    """
+    def lr_lambda(current_step: int):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
-        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-        return max(min_lr, 0.5 * (1.0 + math.cos(math.pi * progress))) * (max_lr - min_lr) + min_lr
+        progress = float(current_step - warmup_steps) / float(max(1, train_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(cycles * math.pi * 2.0 * progress)))
 
-    return LambdaLR(optimizer, lr_lambda)
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 def main(config: Config):
@@ -154,12 +167,10 @@ def main(config: Config):
     #     warmup_init=False,
     # )
 
-    lr_scheduler = get_lr_scheduler(
+    lr_scheduler = cosine_with_warmup_lr_scheduler(
         optimizer,
         warmup_steps=config.warmup_steps,
-        total_steps=config.total_steps,
-        max_lr=config.max_lr,
-        min_lr=config.min_lr
+        train_steps=config.total_steps,
     )
 
     model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
