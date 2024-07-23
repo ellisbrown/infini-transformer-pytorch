@@ -30,8 +30,10 @@ accelerate launch \
     --seq_len 32768 \
     --gen_seq_len 512 \
     --val_steps 100 \
-    --dataset_name allenai/c4-+-GAIR/MathPile \
-    --dataset_version en-+-default
+    --dataset_name GAIR/MathPile \
+    --dataset_version default
+    # --dataset_name allenai/c4-+-GAIR/MathPile \
+    # --dataset_version en-+-default
 
     # --dataset_name pg19 \
     # --dataset_version None

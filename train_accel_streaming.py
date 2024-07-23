@@ -26,6 +26,9 @@ import logging
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
 @dataclass
 class Config:
     total_steps: int = 100_000
@@ -84,6 +87,13 @@ def get_train_val_data(dataset_name, dataset_version, tokenize_fn):
 
     train_dataset = load_dataset(split='train', **dataset_args)
     validation = load_dataset(split='validation', **dataset_args)
+
+    # remove potential bad examples
+    def filter_fn(x):
+        return x is not None and isinstance(x, dict) and 'text' in x and x['text'] is not None and isinstance(x['text'], str) and len(x['text']) > 0
+
+    train_dataset = train_dataset.filter(filter_fn)
+    validation = validation.filter(filter_fn)
 
     tok_train = train_dataset.map(tokenize_fn, batched=True, remove_columns=['text'])
     tok_val = validation.map(tokenize_fn, batched=True, remove_columns=['text'])
@@ -175,18 +185,22 @@ def main(config: Config):
         config.num_tokens = tokenizer.n_vocab
         
         def tokenize_function(examples):
-            # logger.error(f"Tokenizing first batch with len: {len(examples['text'])}")
-            # _asdf = tokenizer.encode_ordinary_batch(examples['text'])
-            # logger.error(f"Tokenized first batch with len: {len(_asdf)}")
-            # exit(0)
-            input_ids = tokenizer.encode_ordinary_batch(examples['text'])
-            return dict(input_ids=input_ids)
+            try:
+                input_ids = tokenizer.encode_ordinary_batch(examples['text'])
+                return dict(input_ids=input_ids)
+            except Exception as e:
+                logger.error(f"Error tokenizing: {len(examples['text'])} examples")
+                raise e
     else:
         tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
         config.num_tokens = len(tokenizer)
 
         def tokenize_function(examples):
-            return tokenizer(examples['text'], return_attention_mask=False, truncation=False)
+            try:
+                return tokenizer(examples['text'], return_attention_mask=False, truncation=False)
+            except Exception as e:
+                logger.error(f"Error tokenizing: {len(examples['text'])} examples")
+                raise e
 
     def decode_tokens(tokens):
         return tokenizer.decode(tokens)
