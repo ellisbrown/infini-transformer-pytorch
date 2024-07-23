@@ -1,8 +1,8 @@
 version: v2
 budget: ai2/prior
-description: train-infini-attention-c4+mathpile-100K-lr5e-4
+description: train-infini-attention-60_c4-40_mathpile-100K-lr5e-4
 tasks:
-- name: train-infini-attention-c4+mathpile-100K-lr5e-4
+- name: train-infini-attention-60_c4-40_mathpile-100K-lr5e-4
   image:
     beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
   command: ['/bin/bash', '-c']
@@ -26,8 +26,8 @@ tasks:
     --gen_seq_len 512
     --dataset_name allenai/c4-+-GAIR/MathPile
     --dataset_version en-+-default
-    --dataset_proportions [0.65,0.35]
-    --wandb_run_name "train-infini-attention-c4+mathpile-100K-lr5e-4"
+    --dataset_proportions [0.6,0.3]
+    --wandb_run_name "train-infini-attention-60_c4-40_mathpile-100K-lr5e-4"
   datasets:
   - mountPath: /nfs
     source:
