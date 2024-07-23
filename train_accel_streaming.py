@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 import os
-from typing import List
+from pathlib import Path
+from typing import List, Tuple, Union
 from infini_transformer_pytorch import (
     InfiniTransformer,
     InfiniTransformerWrapper
@@ -10,6 +11,7 @@ import torch
 from torch import optim
 from torch.utils.data import DataLoader, IterableDataset
 import wandb
+from wandb.sdk.wandb_run import Run
 from datasets import load_dataset, interleave_datasets
 from transformers import AutoTokenizer
 from itertools import islice
@@ -57,7 +59,7 @@ class Config:
     wandb_run_name: str = None
     seed: int = 42
     save_dir: str = "checkpoints"
-    save_every: int = 1000  # save every n steps
+    save_every: int = 500  # save every n steps
     precision: str = "bf16"
 
 
@@ -169,6 +171,37 @@ def cosine_with_warmup_lr_scheduler(optimizer, warmup_steps, train_steps, cycles
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
+
+def get_latest_checkpoint(config: Config, run: Run) -> Tuple[Union[Path, None], bool]:
+    """
+    Get the latest checkpoint file for a given run.
+
+    Args:
+        config (Config): The configuration object.
+        run (Run): The wandb run object.
+
+    Returns:
+        Tuple[Union[Path, None], bool]: A tuple containing the latest checkpoint file path and a boolean indicating
+        whether the checkpoint is local or fetched from wandb. If no checkpoint is found, returns (None, False).
+    """
+    
+    checkpoint_dir = Path(config.save_dir) / run.name
+    local_checkpoints = sorted(checkpoint_dir.glob("model_step_*.pth"), key=lambda x: int(x.stem.split('_')[-1]))
+    
+    if local_checkpoints:
+        return local_checkpoints[-1], True  # Local checkpoint exists
+    
+    # If no local checkpoints, try to fetch from wandb
+    wandb_files = run.files()
+    checkpoint_files = [file for file in wandb_files if file.name.startswith("model_step_") and file.name.endswith(".pth")]
+    
+    if checkpoint_files:
+        latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.name.split('_')[-1].split('.')[0]))
+        return latest_checkpoint, False  # Wandb checkpoint exists
+    
+    return None, False  # No checkpoint found
+
+
 def main(config: Config):
     accelerator = Accelerator(mixed_precision=config.precision)
     device = accelerator.device
@@ -208,11 +241,20 @@ def main(config: Config):
 
     logger.info(f"Current process index: {accelerator.process_index}, Device: {device}")
 
+
     if accelerator.is_main_process:
-        logger.warning(f"Distributed type: {accelerator.distributed_type}")
-        logger.warning(f"Number of processes: {accelerator.num_processes}")
-        logger.warning(f"Effective batch size: {config.effective_batch_size}")
-        wandb.init(project=config.wandb_project, config=config, name=config.wandb_run_name)
+        # Check if a run with the same name exists
+        api = wandb.Api()
+        runs = api.runs(f"{wandb.entity}/{config.wandb_project}")
+        existing_run = next((run for run in runs if run.name == config.wandb_run_name), None)
+
+        if existing_run:
+            logger.info(f"Resuming existing run: {config.wandb_run_name}")
+            run = wandb.init(project=config.wandb_project, id=existing_run.id, resume="must")
+        else:
+            logger.info(f"Starting new run: {config.wandb_run_name}")
+            run = wandb.init(project=config.wandb_project, name=config.wandb_run_name, config=config)
+
         logger.info(f"Config: {config}")
 
     train_dataset, val_dataset = get_datasets(config.dataset_name, config.dataset_version, tokenize_function, config.seq_len, config.dataset_proportions)
@@ -254,16 +296,40 @@ def main(config: Config):
         model, optimizer, train_loader, val_loader, lr_scheduler
     )
 
-    model, optimizer, train_loader, val_loader = accelerator.prepare(
-        model, optimizer, train_loader, val_loader
-    )
+    if accelerator.is_main_process:
+        wandb.watch(model, log="all", log_freq=config.print_every)
+
+    # Always try to restore the latest checkpoint
+    start_step = 0
+    if accelerator.is_main_process:
+        latest_checkpoint, is_local = get_latest_checkpoint(config, run)
+        
+        if latest_checkpoint:
+            if is_local:
+                logger.info(f"Found local checkpoint: {latest_checkpoint}")
+                checkpoint = accelerator.load(latest_checkpoint)
+            else:
+                logger.info(f"Found wandb checkpoint: {latest_checkpoint.name}")
+                checkpoint_file = latest_checkpoint.download(replace=True)
+                checkpoint = accelerator.load(checkpoint_file.name)
+            
+            wrapper.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+            start_step = checkpoint['step']
+            logger.info(f"Resumed from step {start_step}")
+        else:
+            logger.info("No checkpoint found, starting from beginning")
+
+    # Broadcast the start_step to all processes
+    start_step = accelerator.broadcast(start_step, src=0)
 
     train_iter = iter(train_loader)
     val_iter = iter(val_loader)
 
     total_loss = 0
     pbar = tqdm(range(config.total_steps), desc="Training", disable=not accelerator.is_main_process)
-    for step in tqdm(range(config.total_steps), desc="Training", disable=not accelerator.is_main_process):
+    for step in pbar:
         model.train()
         try:
             batch = next(train_iter)
@@ -333,17 +399,30 @@ def main(config: Config):
         if step % config.save_every == 0 and accelerator.is_main_process:
             ckpt_path = os.path.join(config.save_dir, wandb.run.name, f"model_step_{step}.pth")
             os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-            accelerator.save(wrapper.state_dict(), ckpt_path)
+            checkpoint = {
+                'step': step,
+                'model_state_dict': accelerator.unwrap_model(wrapper.model).state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+            }
+            accelerator.save(checkpoint, ckpt_path)
+            wandb.save(ckpt_path, base_path=config.save_dir)
             logger.error(f"Model saved at {ckpt_path}")
 
         accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
-        ckpt_path = os.path.join(config.save_dir, wandb.run.name, "final.pth")
+        # Save final checkpoint
+        ckpt_path = os.path.join(config.save_dir, wandb.run.name, f"model_step_{config.total_steps}.pth")
         os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-        model = accelerator.unwrap_model(wrapper.model)
-        state_dict = model.state_dict()
-        accelerator.save(state_dict, ckpt_path)
+        checkpoint = {
+            'step': config.total_steps,
+            'model_state_dict': accelerator.unwrap_model(wrapper.model).state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+        }
+        accelerator.save(checkpoint, ckpt_path)
+        wandb.save(ckpt_path, base_path=config.save_dir)
         wandb.finish()
 
 if __name__ == "__main__":
