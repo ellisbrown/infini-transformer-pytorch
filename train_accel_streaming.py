@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
+from typing import List
 from infini_transformer_pytorch import (
     InfiniTransformer,
     InfiniTransformerWrapper
@@ -9,7 +10,7 @@ import torch
 from torch import optim
 from torch.utils.data import DataLoader, IterableDataset
 import wandb
-from datasets import load_dataset
+from datasets import load_dataset, interleave_datasets
 from transformers import AutoTokenizer
 from itertools import islice
 from accelerate import Accelerator
@@ -42,6 +43,7 @@ class Config:
     tokenizer_name: str = 'gpt2'
     dataset_name: str = 'Salesforce/wikitext'
     dataset_version: str = 'wikitext-2-raw-v1'
+    dataset_proportions: List[float] = field(default_factory=lambda: [1])
     depth: int = 8
     dim: int = 512
     dim_head: int = 64
@@ -52,7 +54,7 @@ class Config:
     wandb_run_name: str = None
     seed: int = 42
     save_dir: str = "checkpoints"
-    save_every: int = 5000  # save every n steps
+    save_every: int = 1000  # save every n steps
     precision: str = "bf16"
 
 
@@ -69,6 +71,69 @@ class StreamingLMDataset(IterableDataset):
             while len(buffer) >= self.block_size:
                 yield torch.tensor(buffer[:self.block_size])
                 buffer = buffer[self.block_size:]
+
+
+
+def get_train_val_data(dataset_name, dataset_version, tokenize_fn):
+    dataset_args = dict(
+        path=dataset_name,
+        name=dataset_version,
+        trust_remote_code=True,
+        streaming=True
+    )
+
+    train_dataset = load_dataset(split='train', **dataset_args)
+    validation = load_dataset(split='validation', **dataset_args)
+
+    tok_train = train_dataset.map(tokenize_fn, batched=True, remove_columns=['text'])
+    tok_val = validation.map(tokenize_fn, batched=True, remove_columns=['text'])
+
+    train_dataset = tok_train.select_columns('input_ids')
+    val_dataset = tok_val.select_columns('input_ids')
+    
+    return train_dataset, val_dataset
+
+def get_datasets(dataset_name, dataset_version, tokenize_fn, seq_len, proportions=[1]):
+    # handle multiple datasets
+    if "-+-" in dataset_name:
+        logger.info(f"Loading multiple datasets: {dataset_name} ({dataset_version})")
+        if not "-+-" in dataset_version:
+            raise ValueError(f"If using multiple datasets, please provide multiple dataset versions. Got: {dataset_version}")
+        dataset_names = dataset_name.split("-+-")
+        dataset_versions = dataset_version.split("-+-")
+        train_datasets = []
+        val_datasets = []
+        for name, version in zip(dataset_names, dataset_versions):
+            train_dataset, val_dataset = get_train_val_data(name, version, tokenize_fn)
+            train_datasets.append(train_dataset)
+            val_datasets.append(val_dataset)
+
+        logger.info(f"Loaded {len(train_datasets)} datasets: {dataset_names}")
+
+        if proportions is None or proportions == [1]:
+            logger.warning(f"No dataset proportions provided. Defaulting to uniform distribution.")
+            train_dataset = interleave_datasets(train_datasets)
+            val_dataset = interleave_datasets(val_datasets)
+
+        elif len(proportions) != len(train_datasets):
+            raise ValueError(f"Number of dataset proportions ({len(proportions)}) must match number of datasets ({len(train_datasets)})")
+
+        # check if proportions sum to 1 and are non-negative
+        elif not math.isclose(sum(proportions), 1.0, rel_tol=1e-5) or any(p < 0 for p in proportions):
+            raise ValueError(f"Dataset proportions must sum to 1 and be non-negative. Got: {proportions}")
+        
+        else:
+            logger.info(f"Interleaving datasets {dataset_names} with proportions: {proportions}")
+            train_dataset = interleave_datasets(train_datasets, probabilities=proportions)
+            val_dataset = interleave_datasets(val_datasets, probabilities=proportions)
+
+    else:
+        logger.info(f"Loading dataset: {dataset_name} ({dataset_version})")
+        train_dataset, val_dataset = get_train_val_data(dataset_name, dataset_version, tokenize_fn)
+
+    lm_train_dataset = StreamingLMDataset(train_dataset, seq_len)
+    lm_val_dataset = StreamingLMDataset(val_dataset, seq_len)
+    return lm_train_dataset, lm_val_dataset
 
 
 def cosine_with_warmup_lr_scheduler(optimizer, warmup_steps, train_steps, cycles=0.5, last_epoch=-1):
@@ -136,24 +201,7 @@ def main(config: Config):
         wandb.init(project=config.wandb_project, config=config, name=config.wandb_run_name)
         logger.info(f"Config: {config}")
 
-    dataset_args = dict(
-        path=config.dataset_name,
-        name=config.dataset_version,
-        trust_remote_code=True,
-        streaming=True
-    )
-
-    train_dataset = load_dataset(split='train', **dataset_args)
-    validation = load_dataset(split='validation', **dataset_args)
-
-    tok_train = train_dataset.map(tokenize_function, batched=True, remove_columns=['text'])
-    tok_val = validation.map(tokenize_function, batched=True, remove_columns=['text'])
-
-    train_data = tok_train.select_columns('input_ids')
-    val_data = tok_val.select_columns('input_ids')
-
-    train_dataset = StreamingLMDataset(train_data, config.seq_len)
-    val_dataset = StreamingLMDataset(val_data, config.seq_len)
+    train_dataset, val_dataset = get_datasets(config.dataset_name, config.dataset_version, tokenize_function, config.seq_len, config.dataset_proportions)
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=4, pin_memory=True)
