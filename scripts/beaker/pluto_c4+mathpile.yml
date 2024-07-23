@@ -26,7 +26,7 @@ tasks:
     --gen_seq_len 512
     --dataset_name allenai/c4-+-GAIR/MathPile
     --dataset_version en-+-default
-    --dataset_proportions [0.6,0.3]
+    --dataset_proportions [0.6,0.4]
     --wandb_run_name "train-infini-attention-60_c4-40_mathpile-100K-lr5e-4"
   datasets:
   - mountPath: /nfs
