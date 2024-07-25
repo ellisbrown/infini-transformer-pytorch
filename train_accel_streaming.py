@@ -194,12 +194,16 @@ def get_latest_checkpoint(config: Config, run: Run) -> Tuple[Union[Path, None], 
         return local_checkpoints[-1], True  # Local checkpoint exists
     
     # If no local checkpoints, try to fetch from wandb
-    wandb_files = run.files()
-    checkpoint_files = [file for file in wandb_files if file.name.startswith("model_step_") and file.name.endswith(".pth")]
-    
-    if checkpoint_files:
-        latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.name.split('_')[-1].split('.')[0]))
-        return latest_checkpoint, False  # Wandb checkpoint exists
+    api = wandb.Api()
+    try:
+        run = api.run(f"{run.entity}/{run.project}/{run.id}")
+        checkpoint_files = [file for file in run.files() if file.name.startswith("model_step_") and file.name.endswith(".pth")]
+        
+        if checkpoint_files:
+            latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.name.split('_')[-1].split('.')[0]))
+            return latest_checkpoint, False  # Wandb checkpoint exists
+    except Exception as e:
+        logger.error(f"Error fetching wandb files: {e}")
     
     return None, False  # No checkpoint found
 
@@ -246,10 +250,13 @@ def main(config: Config):
 
     if accelerator.is_main_process:
         # Check if a run with the same name exists
-        api = wandb.Api()
-        entity = wandb.Settings().get('default', 'entity')
-        runs = api.runs(f"{config.wandb_entity}/{config.wandb_project}")
-        existing_run = next((run for run in runs if run.name == config.wandb_run_name), None)
+        existing_run = None
+        try:
+            api = wandb.Api()
+            runs = api.runs(f"{config.wandb_entity}/{config.wandb_project}")
+            existing_run = next((run for run in runs if run.name == config.wandb_run_name), None)
+        except Exception as e:
+            logger.error(f"Error fetching runs: {e}")
 
         if existing_run:
             logger.info(f"Resuming existing run: {config.wandb_run_name}")
@@ -325,7 +332,10 @@ def main(config: Config):
             logger.info("No checkpoint found, starting from beginning")
 
     # Broadcast the start_step to all processes
-    start_step = torch.distributed.broadcast(start_step, src=0)
+    if accelerator.distributed_type != 'NO':
+        start_step_tensor = torch.tensor(start_step, dtype=torch.long, device=accelerator.device)
+        dist.broadcast(start_step_tensor, src=0)
+        start_step = start_step_tensor.item()
 
     train_iter = iter(train_loader)
     val_iter = iter(val_loader)
