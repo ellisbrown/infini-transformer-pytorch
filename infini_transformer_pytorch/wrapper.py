@@ -125,7 +125,8 @@ class InfiniTransformerWrapper(Module):
         past_memories = None
 
         show = self.accelerator is None or self.accelerator.is_main_process
-        for curr_len in tqdm(range(init_len, seq_len), disable = not show):
+        for _ in tqdm(range(seq_len), disable = not show):
+            curr_len = out.shape[-1]
 
             # what is fed into the model is always at the start of the very last segment
 
