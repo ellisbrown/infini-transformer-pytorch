@@ -1,8 +1,8 @@
 version: v2
 budget: ai2/prior
-description: train-infini-attention-c4-100K-lr5e-4
+description: train-infini-attention-c4-100K-lr3e-4
 tasks:
-- name: train-infini-attention-c4-100K-lr5e-4
+- name: train-infini-attention-c4-100K-lr3e-4
   image:
     beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
   command: ['/bin/bash', '-c']
@@ -16,17 +16,19 @@ tasks:
     --gradient_accumulate_every 16
     --total_steps 100_000
     --warmup_steps 1_000
-    --learning_rate 5e-4
+    --learning_rate 3e-4
     --depth 12
     --heads 8
     --dim 2048
     --dim_head 128
     --segment_len 2048
     --seq_len 32_768
-    --gen_seq_len 512
+    --prime_len 4096
+    --gen_seq_len 1024
     --dataset_name allenai/c4 
     --dataset_version en
-    --wandb_run_name "train-infini-attention-c4-100K-lr5e-4"
+    --wandb_entity prior-ai2
+    --wandb_run_name "train-infini-attention-c4-100K-lr3e-4"
   datasets:
   - mountPath: /nfs
     source:

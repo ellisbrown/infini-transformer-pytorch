@@ -23,10 +23,12 @@ tasks:
     --dim_head 128
     --segment_len 2048
     --seq_len 32_768
-    --gen_seq_len 512
+    --prime_len 4096
+    --gen_seq_len 1024
     --dataset_name allenai/c4-+-GAIR/MathPile
     --dataset_version en-+-default
     --dataset_proportions [0.6,0.4]
+    --wandb_entity prior-ai2
     --wandb_run_name "train-infini-attention-60_c4-40_mathpile-100K-lr5e-4"
   datasets:
   - mountPath: /nfs

@@ -22,6 +22,7 @@ tasks:
     --seq_len 4096
     --gen_seq_len 512
     --dataset_version wikitext-103-raw-v1
+    --wandb_entity prior-ai2
     --wandb_run_name "train-infini-attention-wikitext103-100ep"
   datasets:
   - mountPath: /nfs

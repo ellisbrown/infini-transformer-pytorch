@@ -41,7 +41,7 @@ class Config:
     val_steps: int = 100
     validate_every: int = 100
     generate_every: int = 100
-    prime_len: int = 100
+    prime_len: int = 1024
     seq_len: int = 1024
     gen_seq_len: int = 1024
     segment_length: int = 128
@@ -55,6 +55,7 @@ class Config:
     heads: int = 8
     use_mem_delta_rule: bool = True
     print_every: int = 10
+    wandb_entity: str = "default"
     wandb_project: str = "infini-transformer-pytorch"
     wandb_run_name: str = None
     seed: int = 42
@@ -245,7 +246,8 @@ def main(config: Config):
     if accelerator.is_main_process:
         # Check if a run with the same name exists
         api = wandb.Api()
-        runs = api.runs(f"{wandb.entity}/{config.wandb_project}")
+        entity = wandb.Settings().get('default', 'entity')
+        runs = api.runs(f"{config.wandb_entity}/{config.wandb_project}")
         existing_run = next((run for run in runs if run.name == config.wandb_run_name), None)
 
         if existing_run:

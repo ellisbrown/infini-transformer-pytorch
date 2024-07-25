@@ -1,8 +1,8 @@
 version: v2
 budget: ai2/prior
-description: train-infini-attention-pg19-100ep
+description: train-infini-attention-pg19-10M
 tasks:
-- name: train-infini-attention-pg19-100ep
+- name: train-infini-attention-pg19-10M
   image:
     beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
   command: ['/bin/bash', '-c']
@@ -11,19 +11,21 @@ tasks:
     cd /nfs/ellisb/infini-transformer-pytorch &&
     ./env/bin/accelerate launch
     --mixed_precision bf16
-    train_accel.py
-    --batch_size 16
+    train_accel_streaming.py
+    --batch_size 4
     --gradient_accumulate_every 16
-    --num_epochs 100
+    --total_steps 10_000_000
     --depth 12
-    --dim 1024
+    --heads 8
+    --dim 2048
     --dim_head 128
-    --segment_len 1024
-    --seq_len 4096
+    --segment_len 2048
+    --seq_len 32_768
     --gen_seq_len 512
-    --dataset_name deepmind/pg19
+    --dataset_name pg19 
     --dataset_version None
-    --wandb_run_name "train-infini-attention-pg19-100ep"
+    --wandb_entity prior-ai2
+    --wandb_run_name "train-infini-attention-pg19-10M"
   datasets:
   - mountPath: /nfs
     source:
