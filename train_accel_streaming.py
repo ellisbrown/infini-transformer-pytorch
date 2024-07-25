@@ -9,6 +9,7 @@ from infini_transformer_pytorch import (
 from tqdm import tqdm
 import torch
 from torch import optim
+import torch.distributed as dist
 from torch.utils.data import DataLoader, IterableDataset
 import wandb
 from wandb.sdk.wandb_run import Run
@@ -309,11 +310,11 @@ def main(config: Config):
         if latest_checkpoint:
             if is_local:
                 logger.info(f"Found local checkpoint: {latest_checkpoint}")
-                checkpoint = accelerator.load(latest_checkpoint)
+                checkpoint = torch.load(latest_checkpoint)
             else:
                 logger.info(f"Found wandb checkpoint: {latest_checkpoint.name}")
                 checkpoint_file = latest_checkpoint.download(replace=True)
-                checkpoint = accelerator.load(checkpoint_file.name)
+                checkpoint = torch.load(checkpoint_file.name)
             
             wrapper.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -324,7 +325,7 @@ def main(config: Config):
             logger.info("No checkpoint found, starting from beginning")
 
     # Broadcast the start_step to all processes
-    start_step = accelerator.broadcast(start_step, src=0)
+    start_step = torch.distributed.broadcast(start_step, src=0)
 
     train_iter = iter(train_loader)
     val_iter = iter(val_loader)
