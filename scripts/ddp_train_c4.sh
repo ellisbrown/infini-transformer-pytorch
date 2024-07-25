@@ -15,9 +15,11 @@
 #     --dataset_name allenai/c4 \
 #     --dataset_version en
 
+# export CUDA_VISIBLE_DEVICES=0 &&
+# python \
 accelerate launch \
     train_accel_streaming.py \
-    --batch_size 4 \
+    --batch_size 2 \
     --gradient_accumulate_every 16 \
     --total_steps 1_000 \
     --depth 12 \
@@ -31,6 +33,7 @@ accelerate launch \
     --dataset_name allenai/c4 \
     --dataset_version en
 
+    # --tokenizer_name tiktoken-cl100k_base \
     # --dataset_name pg19 \
     # --dataset_version None
 

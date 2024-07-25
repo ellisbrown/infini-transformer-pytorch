@@ -1,8 +1,8 @@
 version: v2
 budget: ai2/prior
-description: train-infini-attention-pg19-10M
+description: train-infini-attention-12x8-pg19-10M
 tasks:
-- name: train-infini-attention-pg19-10M
+- name: train-infini-attention-12x8-pg19-10M
   image:
     beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
   command: ['/bin/bash', '-c']
@@ -25,7 +25,7 @@ tasks:
     --dataset_name pg19 
     --dataset_version None
     --wandb_entity prior-ai2
-    --wandb_run_name "train-infini-attention-pg19-10M"
+    --wandb_run_name "train-infini-attention-12x8-pg19-10M"
   datasets:
   - mountPath: /nfs
     source:

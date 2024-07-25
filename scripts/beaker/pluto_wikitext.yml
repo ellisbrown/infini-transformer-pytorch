@@ -1,8 +1,8 @@
 version: v2
 budget: ai2/prior
-description: train-infini-attention-wikitext103-100ep
+description: train-infini-attention-12x8-wikitext103-100ep
 tasks:
-- name: train-infini-attention-wikitext103-100ep
+- name: train-infini-attention-12x8-wikitext103-100ep
   image:
     beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
   command: ['/bin/bash', '-c']
@@ -23,7 +23,7 @@ tasks:
     --gen_seq_len 512
     --dataset_version wikitext-103-raw-v1
     --wandb_entity prior-ai2
-    --wandb_run_name "train-infini-attention-wikitext103-100ep"
+    --wandb_run_name "train-infini-attention-12x8-wikitext103-100ep"
   datasets:
   - mountPath: /nfs
     source:

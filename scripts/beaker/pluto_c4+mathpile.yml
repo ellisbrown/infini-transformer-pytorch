@@ -1,8 +1,8 @@
 version: v2
 budget: ai2/prior
-description: train-infini-attention-60_c4-40_mathpile-100K-lr5e-4
+description: train-infini-attention-12x8-60_c4-40_mathpile-100K-lr5e-4
 tasks:
-- name: train-infini-attention-60_c4-40_mathpile-100K-lr5e-4
+- name: train-infini-attention-12x8-60_c4-40_mathpile-100K-lr5e-4
   image:
     beaker: ai2/cuda11.8-cudnn8-dev-ubuntu20.04
   command: ['/bin/bash', '-c']
@@ -29,7 +29,7 @@ tasks:
     --dataset_version en-+-default
     --dataset_proportions [0.6,0.4]
     --wandb_entity prior-ai2
-    --wandb_run_name "train-infini-attention-60_c4-40_mathpile-100K-lr5e-4"
+    --wandb_run_name "train-infini-attention-12x8-60_c4-40_mathpile-100K-lr5e-4"
   datasets:
   - mountPath: /nfs
     source:
